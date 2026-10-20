@@ -10,17 +10,6 @@ service xia.display.adaptor /vendor/bin/hw/vendor.xia.display.adaptor-V6@1.0-ser
     disabled
     restart_period 5000
     
-# Since starting the service before boot cause issues in some devices, so mkae it run after boot completed instead
-on post-fs-data && property:persist.sys.rianixia.is-displaypanel.support=true
-    mkdir /data/addon
-	chmod 0777 /data/addon
-    mkdir /data/addon/oplus_display
-	chmod 0777 /data/addon/oplus_display
-    chown system system /data/addon/oplus_display
-    chmod 0777 /data/addon/oplus_display/oplus_brightness
-	
+# Since starting the service before boot cause issues in some devices, so make it run after boot completed instead
 on property:sys.boot_completed=1
     start xia.display.adaptor
-    chown system system /data/addon/oplus_display/oplus_brightness
-    chmod 0777 /data/addon/oplus_display/oplus_brightness
-    

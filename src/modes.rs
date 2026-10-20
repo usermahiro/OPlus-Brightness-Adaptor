@@ -3,15 +3,14 @@ use std::os::unix::io::AsRawFd;
 use std::time::Duration;
 use std::{thread::sleep};
 
-use crate::constants::{BRIGHTNESS_OFF, FALLBACK_MIN, OS14_MIN, OS14_MAX};
+use crate::constants::{BRIGHTNESS_OFF, FALLBACK_MIN};
 use crate::logging::{log_d, log_e};
 use crate::properties::{get_prop, get_prop_int};
 use crate::paths::{
-    is_oplus_panel_prop, oplus_bright_path, min_bright_path, persist_oplus_min,
-    persist_oplus_max, bright_path, persist_dbg, display_type_prop,
-    persist_lux_aod_prop, persist_bright_mode_prop, persist_lux_aod_brightness_prop,
+    bright_path, persist_dbg, display_type_prop, persist_lux_aod_prop,
+    persist_bright_mode_prop, persist_lux_aod_brightness_prop,
 };
-use crate::utils::{read_file_int, get_max_brightness, get_min_brightness, is_panoramic_aod_enabled};
+use crate::utils::{get_max_brightness, get_min_brightness, is_panoramic_aod_enabled};
 use crate::scaling::{scale_brightness_linear, scale_brightness_curved, scale_brightness_custom};
 use crate::range::BrightnessRange;
 use crate::state::{get_prop_brightness, get_screen_state};
@@ -23,9 +22,6 @@ pub(crate) fn dbg_on() -> bool {
 }
 
 // mode checks
-pub(crate) fn is_oplus_panel_mode() -> bool {
-    get_prop(is_oplus_panel_prop()).as_deref() == Some("true")
-}
 pub(crate) fn is_float_mode() -> bool {
     get_prop("persist.sys.rianixia.brightness.isfloat").as_deref() == Some("true")
 }
@@ -43,98 +39,10 @@ pub(crate) fn get_brightness_mode() -> i32 {
 
 // main dispatcher
 pub fn run() {
-    if is_oplus_panel_mode() {
-        run_oplus_panel_mode();
-    } else {
-        run_default_mode();
-    }
+    run_default_mode();
 }
 
-// DisplayPanel mode (os14 and under)
-fn run_oplus_panel_mode() {
-    let dbg = dbg_on();
-    if dbg { log_d("[DisplayAdaptor] Starting in DisplayPanel Mode..."); }
-
-    let oplus_path_str = oplus_bright_path();
-    if !std::path::Path::new(oplus_path_str).exists() {
-        if dbg { log_d(&format!("[DisplayPanel Mode] File {} not found, attempting to create it.", oplus_path_str)); }
-        loop {
-            match std::fs::File::create(oplus_path_str) {
-                Ok(_) => {
-                    if dbg { log_d(&format!("[DisplayPanel Mode] Successfully created {}.", oplus_path_str)); }
-                    break;
-                },
-                Err(e) => {
-                    log_e(&format!("[DisplayPanel Mode] Failed to create {}, retrying in 1s: {}", oplus_path_str, e));
-                    sleep(Duration::from_secs(1));
-                }
-            }
-        }
-    }
-    let hw_min = get_min_brightness(dbg);
-    let hw_max = get_max_brightness(dbg);
-
-    let input_min = get_prop_int(persist_oplus_min()).unwrap_or(OS14_MIN);
-    let input_max = get_prop_int(persist_oplus_max()).unwrap_or(OS14_MAX);
-    if dbg { log_d(&format!("[DisplayPanel Mode] Scaling range: {}-{} -> {}-{}", input_min, input_max, hw_min, hw_max)); }
-
-    let file = OpenOptions::new().write(true).open(bright_path());
-    let file = match file {
-        Ok(f) => f,
-        Err(e) => { log_e(&format!("[DisplayPanel Mode] Could not open brightness file: {}", e)); return; },
-    };
-    let fd = file.as_raw_fd();
-
-    let mut last_val = -1;
-
-    let mut current_val = read_file_int(bright_path()).unwrap_or(hw_min);
-    write_brightness(fd, current_val, &mut last_val, dbg);
-
-    loop {
-        current_val = read_file_int(bright_path()).unwrap_or(current_val);
-
-        match read_file_int(oplus_bright_path()) {
-            Some(oplus_bright) => {
-                if oplus_bright == 0 {
-                    if current_val != BRIGHTNESS_OFF {
-                        current_val = BRIGHTNESS_OFF;
-                        write_brightness(fd, current_val, &mut last_val, dbg);
-                    }
-                } else {
-                    let mode = get_brightness_mode();
-                    let target_val = match mode {
-                        1 => scale_brightness_linear(oplus_bright, hw_min, hw_max, input_min, input_max),
-                        2 => scale_brightness_custom(oplus_bright, hw_min, hw_max, input_min, input_max),
-                        _ => scale_brightness_curved(oplus_bright, hw_min, hw_max, input_min, input_max),
-                    };
-
-                    if current_val != target_val {
-                        let diff = target_val - current_val;
-                        let mut step = diff / 4;
-                        if diff != 0 && step == 0 {
-                            step = if diff > 0 { 1 } else { -1 };
-                        }
-                        
-                        current_val += step;
-                        
-                        if (step > 0 && current_val > target_val) || (step < 0 && current_val < target_val) {
-                            current_val = target_val;
-                        }
-
-                        write_brightness(fd, current_val, &mut last_val, dbg);
-                    }
-                }
-            },
-            None => {
-                if dbg { log_e(&format!("[DisplayPanel Mode] Failed to read from {}", oplus_bright_path())); }
-            }
-        };
-        
-        sleep(Duration::from_millis(33));
-    }
-}
-
-// default mode (os 15+)
+// default mode (os 16+)
 fn run_default_mode() {
     let dbg = dbg_on();
     if dbg { log_d("[DisplayAdaptor] Starting in Default Mode..."); }
@@ -183,7 +91,11 @@ fn run_default_mode() {
 
     loop {
         let cur_state = get_screen_state();
-        let raw_bright = get_prop_brightness(&range, is_float);
+        let raw_bright = if cur_state == 0 || cur_state == 1 {
+            prev_bright
+        } else {
+            get_prop_brightness(&range, is_float)
+        };
         let cur_bright = if raw_bright == -1 {
             if dbg { log_d("[DisplayAdaptor] Brightness is 0, ignoring and keeping previous value."); }
             prev_bright // keep old value

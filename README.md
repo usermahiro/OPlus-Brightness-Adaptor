@@ -1,125 +1,124 @@
-### OPlus-Brightness-Adaptor-For-Transsion
+# OPlus Brightness Adaptor for Transsion
 
-A quick fix and simple solution for OPlus/Oppo/Realme ports on Transsion devices. May or maynot work on other brands, try and find out.
-*Please give credit to this REPO or my @ when using.*
+A native Rust daemon that bridges screen brightness between ColorOS/OxygenOS/RealmeUI ports and Transsion hardware (Infinix, Tecno, itel).
 
-The code is open source because I decided not to gatekeep it. If you know a better logic or method, please share! I'm always listening to feedback—even if my responses are rough. Thank you\~
+Porting ColorOS to MediaTek-based Transsion devices usually breaks display backlight control. ColorOS expects its own display panel service, while Transsion kernels expose standard sysfs nodes under `/sys/class/leds/lcd-backlight/`. Without an adaptor, the panel stays pitch black or locks at minimum brightness every time the screen wakes.
 
-### Download
-**[GitHub Releases page](https://github.com/ryanistr/OPlus-Brightness-Adaptor-For-Transsion/releases)**.
+This daemon runs in the background, tracks framework brightness changes in real time, scales values to your panel's hardware limits, and writes directly to the kernel backlight node.
 
-
-## ⚠️ Important
-
-**DO NOT DELETE your stock Transsion light HALs.**
-Just add this alongside them.
+No smali patching, no modified `oplus-services.jar`, and no framework rebuilding needed. Everything runs in compiled Rust.
 
 ---
 
-## How to Use
+## Architecture
 
-> **Note:** Originally made for OS15 ROMs. For OS14 or lower follow this guide instead
-For Android 14 (OS 14) specific instructions, see the [OS14 guide](readme-os14.md).
+![Architecture](architecture.svg)
 
-### Step 1: Copy Files to Vendor
+### How It Works
 
-File structure should look like this:
+1. **Framework Source Selection**: The daemon checks `debug.tracing.screen_brightness`. ColorOS 17 stops publishing this property by default. When the property is absent, the daemon queries `cmd display get-brightness 0` directly through Binder. Because Android's `DisplayPowerController` updates this value whenever ambient light changes, auto-brightness tracks in real time. If `cmd` is unavailable, it uses `Settings.System.screen_brightness` as a manual slider fallback.
+2. **State Guard**: When the screen enters sleep or AOD (state 0 or 1), the daemon pauses brightness updates. This prevents unnecessary process execution while the display is dark.
+3. **Hardware Scaling**: Framework values (0.0 to 1.0 or raw vendor scales) map to your kernel node's actual `min_brightness` and `max_brightness` using your chosen scaling curve.
+4. **Kernel Write**: Writes pass straight to `/sys/class/leds/lcd-backlight/brightness` using raw file descriptors.
 
-```
+---
+
+## Requirements
+
+* Target OS: Android 16 and newer (ColorOS 16, ColorOS 17, Realme UI 6+).
+* Architecture: `aarch64-linux-android`.
+* SELinux: Permissive mode recommended, or label the binary as `mtk_hal_light_exec`.
+
+> **Note:** For Android 14 and older releases, use earlier releases of this adaptor.
+
+---
+
+## Installation
+
+Do not delete your stock Transsion light HALs. Add this service alongside them.
+
+### 1. Copy Files to Vendor
+
+Place the compiled binary and init script into your vendor partition:
+
+```text
 /vendor/bin/hw/vendor.xia.display.adaptor-V6@1.0-service
 /vendor/etc/init/init.xia.display.adaptor.rc
 ```
-DO NOT ADD THE ODM BINARY INCLUDED IN THE ZIP. THOSE ARE FOR OS14.
 
-### Step 2: Set Binary File Context to mtk_light on fs_context
+Make sure file permissions are set to `0755` for the binary and `0644` for the rc file.
 
-```bash
-u:object_r:mtk_hal_light_exec:s0
+### 2. File Context (`file_contexts`)
+
+Set the binary context in `plat_file_contexts` or `vendor_file_contexts`:
+
+```text
+/vendor/bin/hw/vendor\.xia\.display\.adaptor-V6@1\.0-service    u:object_r:mtk_hal_light_exec:s0
 ```
 
-### Step 3: Add Debug Prop (Optional)
+If you prefer permissive testing first, you can leave SELinux permissive and verify behavior before locking down contexts.
 
-```bash
-persist.sys.rianixia.display-debug=true
-```
+### 3. AMOLED Vendor Properties
 
----
+If your target device has an AMOLED panel, check your `my_product` build properties and strip conflicting OPlus display keys (`vrr`, `silky`, `underscreen`). Then append these properties to `vendor/build.prop`:
 
-## SEPolicy
-
-None.
-Address manually or use permissive mode. Each device may have different sysfs labels.
-
----
-
-## Display Types
-
-### IPS LCD Displays
-
-Should work as-is. If not, refer to AMOLED method.
-
-### AMOLED Displays
-
-Make sure to check `my_product` and remove props containing: `vrr`, `brightness`, `silky`, `underscreen`. Then add the following props in vendor properties:
-
-```bash
-# Brightness Props for AMOLED
+```ini
 persist.sys.tran.brightness.gammalinear.convert=1
 ro.vendor.transsion.backlight_hal.optimization=1
 ro.transsion.backlight.level=-1
 ro.transsion.physical.backlight.optimization=1
 ```
-## Runtime Notes
-
-* The adaptor auto-detects `max_brightness` and `min_brightness` from the kernel unless overridden via properties.
-* Enable `persist.sys.rianixia.display-debug=true` for verbose logging to diagnose scaling and AOD behavior (log tag: `Xia-DisplayAdaptor`).
-
-### Core Configuration
-
-| Property                                  | Type | Default | Description                                                                                  |
-| ----------------------------------------- | ---: | ------: | -------------------------------------------------------------------------------------------- |
-| `persist.sys.rianixia.brightness.mode`    |  Int |     `0` | Selects the scaling algorithm.                                                               |
-|                                           |      |         | `0`: Curved (Gamma 2.2)                                                                      |
-|                                           |      |         | `1`: Linear                                                                                  |
-|                                           |      |         | `2`: Custom (75% in = 255 out)                                                               |
-| `persist.sys.rianixia.oplus.lux_aod`      | Bool | `false` | Enables specific handling for Lux AOD panels.                                                |
-|                                           |      |         | Prevents 0-brightness writes during Doze (State 3) and applies fix for raw value `2937.773`. |
-| `persist.sys.rianixia.brightness.isfloat` | Bool | `false` | Set to `true` if the ROM uses float brightness values in `debug.tracing.screen_brightness`.  |
-| `persist.sys.rianixia.display-debug`      | Bool | `false` | Enables verbose debug logging to logcat (Tag: `Xia-DisplayAdaptor`).                         |
-
-### Hardware Overrides
-
-| Property                                        | Type | Description                                                                            |
-| ----------------------------------------------- | ---: | -------------------------------------------------------------------------------------- |
-| `persist.sys.rianixia.custom.devmax.brightness` |  Int | Manually override the maximum hardware brightness value used for scaling calculations. |
-| `persist.sys.rianixia.hw_max`                   |  Int | (Auto-Generated) Cached hardware max brightness. Clear this to re-detect.              |
-| `persist.sys.rianixia.hw_min`                   |  Int | (Auto-Generated) Cached hardware min brightness. Clear this to re-detect.              |
-
-### Legacy / DisplayPanel Mode (OS 14)
-
-These properties are only relevant if `persist.sys.rianixia.is-displaypanel.support` is set to `true`.
-
-| Property                           | Type | Description                            |
-| ---------------------------------- | ---: | -------------------------------------- |
-| `persist.sys.rianixia-display.min` |  Int | Input range minimum (default: `22`).   |
-| `persist.sys.rianixia-display.max` |  Int | Input range maximum (default: `5118`). |
 
 ---
 
-## Scaling Modes
+## Configuration Properties
 
-* **Curved (Mode 0)**: Uses a standard Gamma 2.2 approximation. Best for human perception.
-* **Linear (Mode 1)**: Direct 1:1 mapping (normalized) between input and output ranges.
-* **Custom (Mode 2)**: A specifically tuned curve where 75% of the input range maps to hardware value `255` (approx. 50% on 511 scale), with steeper scaling thereafter.
+All settings apply through Android system properties without recompiling the binary.
+
+| Property | Type | Default | Details |
+|---|---|---|---|
+| `persist.sys.rianixia.brightness.mode` | Int | `0` | `0`: Curved (Gamma 2.2 approximation)<br>`1`: Linear (1:1 direct mapping)<br>`2`: Custom (75% input maps to 255) |
+| `persist.sys.rianixia.brightness.isfloat` | Bool | `false` | Set `true` if your ROM writes normalized floats (0.0 to 1.0) into `debug.tracing.screen_brightness`. |
+| `persist.sys.rianixia.display-debug` | Bool | `false` | Enables verbose logging in logcat under tag `Xia-DisplayAdaptor`. |
+| `persist.sys.rianixia.oplus.lux_aod` | Bool | `false` | Keeps panel backlight alive during Doze (state 3) on Lux AOD panels. |
+| `persist.sys.rianixia.custom.devmax.brightness` | Int | *unset* | Manual override for maximum panel brightness if sysfs auto-detection picks the wrong node. |
+
+---
+
+## Scaling Algorithms
+
+* **Mode 0 (Curved)**: Uses a Gamma 2.2 perceptual curve. Matches how the human eye perceives light changes in dim environments.
+* **Mode 1 (Linear)**: Direct mathematical scaling between framework range and kernel backlight limits.
+* **Mode 2 (Custom)**: Aggressive low-end curve where 75% of slider travel maps to mid-level brightness, leaving the top 25% for high-brightness boost.
 
 ---
 
-## Lux / AOD Behavior
+## Debugging
 
-* When `persist.sys.rianixia.oplus.lux_aod` is enabled, the adaptor:
+To monitor real-time scaling and state transitions, turn on debug logging:
 
-  * Prevents writing `0` to the kernel backlight during Doze State 3 to avoid AOD blackouts.
-  * Applies a special-case fix for panels reporting raw brightness `2937.773`.
+```bash
+setprop persist.sys.rianixia.display-debug true
+logcat -s Xia-DisplayAdaptor
+```
+
+Sample output:
+
+```text
+[Default Mode] Mode: Curved, Lux AOD: false
+[BrightnessRange] Initialized with range: min=222, max=8191
+[BrightnessSource] Using 'cmd display get-brightness' fallback.
+Writing brightness: 4 -> 100
+```
 
 ---
-# Enjoy
+
+## Building from Source
+
+Build with the Android NDK toolchain:
+
+```bash
+cargo build --target aarch64-linux-android --release
+```
+
+The resulting binary will be located in `target/aarch64-linux-android/release/xia_display_adaptor`.
